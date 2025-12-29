@@ -18,7 +18,7 @@ def fetch_dex_data(address):
     url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
     try:
         response = requests.get(url)
-        if response.status_status == 200:
+        if response.status_code == 200:
             return response.json().get('pairs', [])
         return []
     except Exception as e:
