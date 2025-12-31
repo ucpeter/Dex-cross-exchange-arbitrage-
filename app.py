@@ -1,30 +1,19 @@
+
 import streamlit as st
 import requests
 import pandas as pd
-import time
 
-st.set_page_config(page_title="Deep Arb Scanner", layout="wide")
+st.set_page_config(page_title="Pro Arb Scanner v2", layout="wide")
 
-st.title("🛡️ Deep Liquidity Arb Scanner")
+st.title("⚖️ Accurate Cross-DEX Scanner")
 
-# --- Optimized Sidebar ---
-network = st.sidebar.selectbox("Network", ["base", "solana", "ethereum", "bsc", "arbitrum"])
-min_liq = st.sidebar.slider("Min Liquidity ($)", 1000, 50000, 5000)
-min_margin = st.sidebar.slider("Min Margin (%)", 0.5, 5.0, 1.0)
+# --- Sidebar ---
+st.sidebar.header("Scan Parameters")
+token_id = st.sidebar.text_input("Token Address", "0x6982508145454ce325ddbe47a25d4ec3d2311933")
+min_liq = st.sidebar.number_input("Minimum Liquidity ($)", value=2000, step=500)
+network_choice = st.sidebar.selectbox("Blockchain", ["ethereum", "bsc", "base", "arbitrum", "solana"])
 
-def fetch_latest_pairs(chain):
-    """Gets the newest pairs launched in the last few hours."""
-    url = f"https://api.dexscreener.com/token-boosts/latest/v1" # Scanning boosted/active tokens
-    try:
-        r = requests.get(url)
-        if r.status_code == 200:
-            # Filter for your specific chain immediately
-            return [t for t in r.json() if t.get('chainId') == chain]
-        return []
-    except:
-        return []
-
-def get_all_pools(address):
+def fetch_data(address):
     url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
     try:
         r = requests.get(url)
@@ -32,54 +21,62 @@ def get_all_pools(address):
     except:
         return []
 
-if st.button("Run Deep Scan"):
-    latest = fetch_latest_pairs(network)
-    if not latest:
-        st.warning(f"No active boosted tokens found on {network} right now. Try another network.")
+if st.button("Find Real Opportunities"):
+    pairs = fetch_data(token_id)
+    
+    if not pairs:
+        st.error("No pools found.")
     else:
         results = []
-        progress = st.progress(0)
-        
-        for i, entry in enumerate(latest[:30]): # Scan top 30 active tokens
-            progress.progress((i + 1) / 30)
-            addr = entry.get('tokenAddress')
-            pools = get_all_pools(addr)
+        for p in pairs:
+            # Filter by network
+            if p['chainId'] != network_choice:
+                continue
             
-            valid_pools = []
-            for p in pools:
-                liq = float(p.get('liquidity', {}).get('usd', 0))
-                if p['chainId'] == network and liq >= min_liq:
-                    valid_pools.append({
-                        "DEX": p['dexId'].upper(),
-                        "Symbol": p['baseToken']['symbol'],
-                        "Price": float(p.get('priceUsd', 0)),
-                        "Liquidity": liq,
-                        "Pair": f"{p['baseToken']['symbol']}/{p['quoteToken']['symbol']}"
-                    })
+            liq = float(p.get('liquidity', {}).get('usd', 0))
+            price_usd = float(p.get('priceUsd', 0))
+            
+            # 1. Skip if price or liquidity is missing/too low
+            if liq < min_liq or price_usd == 0:
+                continue
 
-            if len(valid_pools) >= 2:
-                df_p = pd.DataFrame(valid_pools)
-                low = df_p.loc[df_p['Price'].idxmin()]
-                others = df_p[df_p['DEX'] != low['DEX']]
+            results.append({
+                "DEX": p['dexId'].upper(),
+                "Pair": f"{p['baseToken']['symbol']}/{p['quoteToken']['symbol']}",
+                "Price": price_usd,
+                "Liquidity": liq,
+                "Link": p['url']
+            })
+
+        if len(results) >= 2:
+            df = pd.DataFrame(results)
+            
+            # Find Min/Max but filter out "Impossible" Gaps (>100% profit)
+            low_row = df.loc[df['Price'].idxmin()]
+            high_row = df.loc[df['Price'].idxmax()]
+            margin = ((high_row['Price'] - low_row['Price']) / low_row['Price']) * 100
+
+            # --- Results Display ---
+            if margin > 100:
+                st.error(f"Filtered out a {margin:.0f}% gap - Likely a pricing error or scam.")
+            else:
+                col1, col2, col3 = st.columns(3)
+                col1.metric("BUY AT", f"{low_row['DEX']} ({low_row['Pair']})", f"${low_row['Price']:,.8f}")
+                col2.metric("SELL AT", f"{high_row['DEX']} ({high_row['Pair']})", f"${high_row['Price']:,.8f}")
+                col3.metric("GROSS MARGIN", f"{margin:.2f}%")
                 
-                if not others.empty:
-                    high = others.loc[others['Price'].idxmax()]
-                    gap = ((high['Price'] - low['Price']) / low['Price']) * 100
-                    
-                    if gap >= min_margin and gap < 30: # Filter out crazy scam gaps
-                        results.append({
-                            "Token": low['Symbol'],
-                            "Buy At": low['DEX'],
-                            "Sell At": high['DEX'],
-                            "Margin": f"{gap:.2f}%",
-                            "Liquidity": f"${low['Liquidity']:,.0f}",
-                            "Pairs": f"{low['Pair']} vs {high['Pair']}"
-                        })
-            time.sleep(0.1) # Prevent API ban
-
-        if results:
-            st.success(f"Found {len(results)} potential gaps!")
-            st.table(results)
+                # Show formatted table
+                st.subheader("All Valid Liquidity Pools")
+                st.dataframe(
+                    df.sort_values("Price"),
+                    column_config={
+                        "Price": st.column_config.NumberColumn("Price (USD)", format="$%.8f"),
+                        "Liquidity": st.column_config.NumberColumn("Liquidity (USD)", format="$%,.2f"),
+                        "Link": st.column_config.LinkColumn("DEX Link")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
         else:
-            st.error("No cross-DEX gaps found. Market is currently balanced.")
+            st.info("Found data, but not enough pairs met your 'Min Liquidity' filter.")
             
