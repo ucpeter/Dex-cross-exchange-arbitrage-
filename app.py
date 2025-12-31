@@ -1,82 +1,71 @@
-
 import streamlit as st
 import requests
-import pandas as pd
+import time
 
-st.set_page_config(page_title="Pro Arb Scanner v2", layout="wide")
+# --- Settings ---
+st.set_page_config(page_title="Flashloan Arb Finder", layout="wide")
+st.title("⚡ Furucombo Flashloan Scanner")
 
-st.title("⚖️ Accurate Cross-DEX Scanner")
+# Furucombo mainly supports these on Ethereum
+NETWORKS = ["ethereum", "polygon", "arbitrum"]
+network = st.sidebar.selectbox("Network", NETWORKS)
+min_profit_usd = st.sidebar.number_input("Min Profit After Gas ($)", value=50)
 
-# --- Sidebar ---
-st.sidebar.header("Scan Parameters")
-token_id = st.sidebar.text_input("Token Address", "0x6982508145454ce325ddbe47a25d4ec3d2311933")
-min_liq = st.sidebar.number_input("Minimum Liquidity ($)", value=2000, step=500)
-network_choice = st.sidebar.selectbox("Blockchain", ["ethereum", "bsc", "base", "arbitrum", "solana"])
-
-def fetch_data(address):
-    url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
+def scan_dex_pairs():
+    # Using DexScreener's Latest Pairs for high-frequency updates
+    url = f"https://api.dexscreener.com/token-boosts/latest/v1"
     try:
-        r = requests.get(url)
-        return r.json().get('pairs', []) if r.status_code == 200 else []
+        response = requests.get(url)
+        if response.status_code == 200:
+            tokens = [t for t in response.json() if t['chainId'] == network]
+            return tokens
+        return []
     except:
         return []
 
-if st.button("Find Real Opportunities"):
-    pairs = fetch_data(token_id)
-    
-    if not pairs:
-        st.error("No pools found.")
-    else:
-        results = []
-        for p in pairs:
-            # Filter by network
-            if p['chainId'] != network_choice:
-                continue
-            
-            liq = float(p.get('liquidity', {}).get('usd', 0))
-            price_usd = float(p.get('priceUsd', 0))
-            
-            # 1. Skip if price or liquidity is missing/too low
-            if liq < min_liq or price_usd == 0:
-                continue
+def get_pair_prices(token_address):
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
+    try:
+        res = requests.get(url).json()
+        return res.get('pairs', [])
+    except:
+        return []
 
-            results.append({
-                "DEX": p['dexId'].upper(),
-                "Pair": f"{p['baseToken']['symbol']}/{p['quoteToken']['symbol']}",
-                "Price": price_usd,
-                "Liquidity": liq,
-                "Link": p['url']
-            })
-
-        if len(results) >= 2:
-            df = pd.DataFrame(results)
+if st.button("Search for Executable Combos"):
+    with st.spinner("Scanning Mempool-adjacent data..."):
+        trending = scan_dex_pairs()
+        found = []
+        
+        for token in trending[:15]: # Scan top 15 most active tokens
+            pairs = get_pair_prices(token['tokenAddress'])
             
-            # Find Min/Max but filter out "Impossible" Gaps (>100% profit)
-            low_row = df.loc[df['Price'].idxmin()]
-            high_row = df.loc[df['Price'].idxmax()]
-            margin = ((high_row['Price'] - low_row['Price']) / low_row['Price']) * 100
-
-            # --- Results Display ---
-            if margin > 100:
-                st.error(f"Filtered out a {margin:.0f}% gap - Likely a pricing error or scam.")
-            else:
-                col1, col2, col3 = st.columns(3)
-                col1.metric("BUY AT", f"{low_row['DEX']} ({low_row['Pair']})", f"${low_row['Price']:,.8f}")
-                col2.metric("SELL AT", f"{high_row['DEX']} ({high_row['Pair']})", f"${high_row['Price']:,.8f}")
-                col3.metric("GROSS MARGIN", f"{margin:.2f}%")
+            # Filter for Furucombo-supported DEXs
+            # Furucombo supports: UNISWAP, SUSHISWAP, QUICKswap, KYBER
+            valid_pools = [p for p in pairs if p['dexId'] in ['uniswap', 'sushiswap', 'quickswap', 'kyber']]
+            
+            if len(valid_pools) >= 2:
+                # Compare lowest and highest
+                low = min(valid_pools, key=lambda x: float(x['priceUsd']))
+                high = max(valid_pools, key=lambda x: float(x['priceUsd']))
                 
-                # Show formatted table
-                st.subheader("All Valid Liquidity Pools")
-                st.dataframe(
-                    df.sort_values("Price"),
-                    column_config={
-                        "Price": st.column_config.NumberColumn("Price (USD)", format="$%.8f"),
-                        "Liquidity": st.column_config.NumberColumn("Liquidity (USD)", format="$%,.2f"),
-                        "Link": st.column_config.LinkColumn("DEX Link")
-                    },
-                    use_container_width=True,
-                    hide_index=True
-                )
+                price_diff = float(high['priceUsd']) - float(low['priceUsd'])
+                margin_pct = (price_diff / float(low['priceUsd'])) * 100
+                
+                # Flashloan Check: Profit must cover 0.09% fee + High Gas
+                if margin_pct > 0.5: # 0.5% is a realistic minimum for flashloans
+                    found.append({
+                        "Token": token['baseToken']['symbol'],
+                        "Buy DEX": low['dexId'].upper(),
+                        "Sell DEX": high['dexId'].upper(),
+                        "Margin": f"{margin_pct:.2f}%",
+                        "Liquidity": f"${float(low['liquidity']['usd']):,.0f}",
+                        "Address": token['tokenAddress']
+                    })
+        
+        if found:
+            st.success(f"Found {len(found)} potential combos!")
+            st.table(found)
+            st.info("💡 **Next Step:** Copy the Address to Furucombo, add a 'Flashloan' cube, then 'Swap' cubes for the Buy/Sell DEXs.")
         else:
-            st.info("Found data, but not enough pairs met your 'Min Liquidity' filter.")
-            
+            st.warning("No significant gaps found. Markets are currently efficient.")
+    
